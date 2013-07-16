@@ -1,0 +1,3 @@
+*add config variable to control whether or not we output OD to serial port
+*convert freq to OD value
+*update docs

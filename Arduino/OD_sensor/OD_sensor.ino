@@ -1,254 +1,178 @@
 // slave code
 #include <Wire.h>
-#include <EEPROM.h>
+#include <avr/eeprom.h>
 
-byte dataOut[3] = {};
-byte dataIn[6] = {};
-boolean requestIn;
-boolean receiveIn;
-unsigned char reg;
+#define TSL_FREQ_PIN 2 // output use digital pin2 for interrupt
+#define TSL_S0 3
+#define TSL_S1 4
+#define TSL_S2 5
+#define TSL_S3 6
+
+uint32_t pulse_cnt = 0;
+uint32_t cur_tm   = millis();
+uint32_t pre_tm = cur_tm; 
+uint16_t tm_diff = 0; 
+int16_t freq_mult = 100;
+int16_t calc_sensitivity = 10;
+float freq_ = 0.0;
+
+const int16_t motor1Pin = 10;    // H-bridge leg 1 (pin 5, 1A)
+const int16_t motor2Pin = 11;    // H-bridge leg 2 (pin 7, 2A)
+const int16_t enablePin = 12;    // H-bridge enable pin (pin 6)
+int16_t per=23;
+int16_t Int=0;
+
+uint8_t i2c_address_;
+uint16_t polling_period_ms_;
 char buffer[100];
-long last_update = 0;
+int32_t last_update = 0;
 
-// peltier controller used
-int target_temp_;
-int ramp_speed_;
-
-int TARGET_TEMP_EEPROM_ADDRESS = 0;
-int RAMP_SPEED_EEPROM_ADDRESS = 4;
-
-// temperature of all three thermocouples
-int t_peltier = 20;
-int t_droplet = 21;
-int t_2nd_peltier = 22;
-
-// Python thermocouple_id
-#define PELTIER_T_PIN 0 // 0
-#define DROPLET_T_PIN 1 // 1
-#define SCD_PELTIER_T_PIN 2   // 2
-
-//Function for Temp(C) depending on Voltage (milliamp)
-#define SIZE_FTV_TBL 32
-int ftv[32][2] = { // voltage to temp table
-  {-20,-189},
-  {-10,-94},
-  {0,3},
-  {10,101},
-  {20,200},
-  {25,250},
-  {30,300},
-  {40,401},
-  {50,503},
-  {60,605},
-  {80,810},
-  {100,1015},
-  {120,1219},
-  {140,1420},
-  {160,1620},
-  {180,1817},
-  {200,2015},
-  {220,2213},
-  {240,2413},
-  {260,2614},
-  {280,2817},
-  {300,3022},
-  {320,3227},
-  {340,3434},
-  {360,3641},
-  {380,3849},
-  {400,4057},
-  {420,4266},
-  {440,4476},
-  {460,4686},
-  {480,4896},
-  {500,5107}
-};
-  
-
-// Thermocouple read code
-float TH_Temp(int ANALOGUE_PIN) {
-  float temp;
-  // take average of 100 samples
-  float sampleTotal = 0;
-  for(int i=0; i<100; i++) {
-    sampleTotal += (float)analogRead(ANALOGUE_PIN)/100;
-  }
-  int mV = ((sampleTotal)/1023.0) * 5000;
-  int i=1;
-  int C1=0;
-  int C2=0;
-  int V1,V2;
-
-  // for loop
-  for(int i=1; (i<32) && C2==0; i++) {
-    if (ftv[i][1]>mV) {
-	C2 = ftv[i][0];
-	C1 = ftv[i-1][0];
-	V1 = ftv[i-1][1];
-	V2 = ftv[i][1];
-    }
-  }
-
-  // check size of stuffs
-  if (i==SIZE_FTV_TBL) {
-    temp = 9999;
-  } else {
-    temp = float(mV-V1)/(V2-V1);
-    temp = temp * (C2-C1) + C1;
-  }
-  
-  return temp;
-}
-
-// peltier control code
-void control(int heat = 5, int cool = 6) {
-  // if we've updated < 100ms ago, return
-  long time = millis();
-  if(time-last_update<100) {
-    return;
-  }
-  last_update = time;
-  
-  #define FORWARD 0
-  #define REVERSE 1
-
-  pinMode(heat, OUTPUT); // heating
-  pinMode(cool, OUTPUT); // cooling 
-
-  int bias = 0;  
-
-  delay(100);
-
-  double peltier = TH_Temp(PELTIER_T_PIN); //0
-  double droplet = TH_Temp(DROPLET_T_PIN); //1
-  double scd_peltier = TH_Temp(SCD_PELTIER_T_PIN); //2
-  
-  t_peltier = (int)peltier;
-  t_droplet = (int)droplet;
-  t_2nd_peltier = (int)scd_peltier;
-  
-  // change to droplet
-  if (target_temp_ >= peltier) {
-    bias = FORWARD;
-  } else {
-    bias = REVERSE;
-  }
-  
-  int targetpin = bias + heat;
-  int otherpin = (bias ^ 1) + heat;
-
-  // changed to glass, analog pin 2, for automation link
-  // pin 0 is peltier (between top and bottom peltier layers)
-  // pin 1 droplet (measure actual droplet temp for comparison)
-  double delta = abs(peltier - target_temp_);
-
-  digitalWrite(otherpin, LOW);
-  
-  if (delta > 0.5) {
-    digitalWrite(targetpin, HIGH);
-  } else {
-    //double fade = (pow(delta, 0.3333)/1.587) * 255;//(delta/4.0) * 255;
-    double fade = delta * 255;
-    analogWrite(targetpin, fade);
-  }
-}
-
-void checkCommand() {
-  switch(dataIn[0]) {
-  case 0: // i2c is asking us for the temperatures of all 3 thermocouples
-    dataOut[0] = (char)t_peltier;
-    dataOut[1] = (char)t_droplet;
-    dataOut[2] = (char)t_2nd_peltier;
-    Serial.print("t_peltier=");
-    Serial.println(t_peltier);
-    break;
-  case 1: // i2c is asking us to set the temperature for the peltier device
-          // use peltier thermocouple as feedback controller
-    setTargetTemp((int)dataIn[1]);
-    setRampSpeed((int)dataIn[2]);
-    break;
-  default:
-    break;
-  }
-}
-
-void handleReceive(int howMany) {
-  int i = 0;
-  while(Wire.available()) {
-    dataIn[i++] = Wire.read();
-  }
-  checkCommand();
-}
+uint16_t EEPROM_I2C_ADDRESS = 0;
+uint16_t EEPROM_POLLING_PERIOD_MS = EEPROM_I2C_ADDRESS+sizeof(i2c_address_);
 
 void handleRequest() {
-  Wire.write(dataOut, 3);
-}
-
-void setTargetTemp(int target_temp) {
-  target_temp_=target_temp;
-  for(int i=0; i<sizeof(target_temp_); i++) {
-    EEPROM.write(i+TARGET_TEMP_EEPROM_ADDRESS, ((byte*)&target_temp_)[i]);
-  }
-  Serial.print("target_temp=");
-  Serial.println(target_temp_);  
-}
-
-void setRampSpeed(int ramp_speed) {
-  ramp_speed_=ramp_speed;
-  for(int i=0; i<sizeof(ramp_speed_); i++) {
-    EEPROM.write(i+RAMP_SPEED_EEPROM_ADDRESS, ((byte*)&ramp_speed_)[i]);
-  }
-  Serial.print("ramp_speed=");
-  Serial.println(ramp_speed_);  
+  Wire.write((uint8_t*)&freq_, 4);
 }
 
 void setup() {
+  i2c_address_ = eeprom_read_byte((uint8_t*)EEPROM_I2C_ADDRESS);
+  polling_period_ms_ = eeprom_read_word((uint16_t*)EEPROM_POLLING_PERIOD_MS);
   Serial.begin(115200);
-  Wire.begin(1);
+  Wire.begin(i2c_address_);
   Wire.onRequest(handleRequest);
-  Wire.onReceive(handleReceive);
-  for(int i=0; i<sizeof(target_temp_); i++) {
-     ((byte*)&target_temp_)[i] = EEPROM.read(i+TARGET_TEMP_EEPROM_ADDRESS);
-  }
-  for(int i=0; i<sizeof(ramp_speed_); i++) {
-     ((byte*)&ramp_speed_)[i] = EEPROM.read(i+RAMP_SPEED_EEPROM_ADDRESS);
-  }
+
+  // attach interrupt to pin2, send output pin of TSL230R to arduino 2
+  // call handler on each rising pulse
+  attachInterrupt(0, add_pulse, RISING);
+   
+  pinMode(TSL_FREQ_PIN, INPUT);
+  pinMode(TSL_S0, OUTPUT);
+  pinMode(TSL_S1, OUTPUT);
+  pinMode(TSL_S2, OUTPUT);
+  pinMode(TSL_S3, OUTPUT);
+  
+  // 1x sensitivity,
+  // divide-by-100 scaling
+   
+  digitalWrite(TSL_S0, HIGH);
+  digitalWrite(TSL_S1, HIGH);
+  digitalWrite(TSL_S2, HIGH);
+  digitalWrite(TSL_S3, HIGH);
+  
+  pinMode(motor1Pin, OUTPUT); 
+  pinMode(motor2Pin, OUTPUT); 
+  pinMode(enablePin, OUTPUT);
+  digitalWrite(enablePin, HIGH);
+  //val=per*(255./100.);
+  //Int=val;
+  Int=(per*255/100);
+  analogWrite(motor1Pin, Int);  // set leg 1 of the H-bridge high
+  digitalWrite(motor2Pin, LOW);   // set leg 2 of the H-bridge low
+}
+
+void add_pulse() {
+  pulse_cnt++;
+  return;
+}
+
+void update_tsl_freq() {
+  // we have to scale out the frequency --
+  // Scaling on the TSL230R requires us to multiply by a factor
+  // to get actual frequency
+  freq_ = (float)(pulse_cnt * freq_mult);  
+  Serial.println(freq_);
+
+  // reset the pulse counter
+  pulse_cnt = 0;
+}
+
+void config() {
+  Serial.println("OD_sensor config:");
+  print_i2c_address();
+  print_polling_period_ms();
+}
+
+void print_i2c_address() {
+  Serial.print("i2c_address=");
+  Serial.println(i2c_address_);
+}
+
+void print_polling_period_ms() {
+  Serial.print("polling_period_ms=");
+  Serial.println(polling_period_ms_);
+}
+
+void print_freq() {
+  Serial.print("freq=");
+  Serial.println(freq_);
 }
 
 void loop() {
-  int dataLen = Serial.available();
-  if(dataLen) {
-    Serial.readBytes(buffer, min(sizeof(buffer), dataLen));
-    Serial.flush();
-    buffer[min(sizeof(buffer), dataLen)]=0;
-    char* substr = strstr(buffer, "target_temp=");
-    if(substr) {
-      setTargetTemp(atoi(substr+sizeof("target_temp=")-1));
-    }
-
-    substr = strstr(buffer, "ramp_speed=");
-    if(substr) {
-      setRampSpeed(atoi(substr+sizeof("ramp_speed=")-1));
-    }
-
-    substr = strstr(buffer, "target_temp?");
-    if(substr) {
-      Serial.print("target_temp=");
-      Serial.println(target_temp_);
-    }
-
-    substr = strstr(buffer, "ramp_speed?");
-    if(substr) {
-      Serial.print("ramp_speed=");
-      Serial.println(ramp_speed_);
-    }
-
-    substr = strstr(buffer, "t_peltier?");
-    if(substr) {
-      Serial.print("t_peltier=");
-      Serial.println(t_peltier);
-    }
+  // check the value of the light sensor every polling_period_ms_
+  // calculate how much time has passed  
+  pre_tm = cur_tm;
+  cur_tm = millis();
+  if( cur_tm > pre_tm ) {
+    tm_diff += cur_tm - pre_tm;
+  } else if( cur_tm < pre_tm ) {
+    // handle overflow and rollover (Arduino 011)
+    tm_diff += ( cur_tm + ( 34359737 - pre_tm ));
   }
-  control();
+  
+  // if enough time has passed to do a new reading...
+  if( tm_diff >= polling_period_ms_ ) {
+    // re-set the ms counter
+    tm_diff = 0;
+
+    // update our current frequency reading
+    update_tsl_freq();
+  }
+  
+  if(Serial.available()) {
+    byte len = Serial.readBytesUntil('\n', buffer, sizeof(buffer));
+    buffer[len]=0;
+    char* substr;
+    substr = strstr(buffer, "config?");
+    if(substr) {
+      config();
+      return;
+    }
+
+    substr = strstr(buffer, "i2c_address?");
+    if(substr) {
+      print_i2c_address();
+      return;
+    }
+
+    substr = strstr(buffer, "i2c_address=");
+    if(substr) {
+      i2c_address_ = atoi(substr+sizeof("i2c_address=")-1);
+      eeprom_write_byte((uint8_t*)EEPROM_I2C_ADDRESS, i2c_address_);
+      print_i2c_address();
+      return;
+    }
+
+    substr = strstr(buffer, "polling_period_ms?");
+    if(substr) {
+      print_polling_period_ms();
+      return;
+    }
+
+    substr = strstr(buffer, "polling_period_ms=");
+    if(substr) {
+      polling_period_ms_ = atoi(substr+sizeof("polling_period_ms=")-1);
+      eeprom_write_word((uint16_t*)EEPROM_POLLING_PERIOD_MS, polling_period_ms_);
+      print_polling_period_ms();
+      return;
+    }
+
+    substr = strstr(buffer, "freq?");
+    if(substr) {
+      print_freq();
+      return;
+    }
+    
+    Serial.println("unrecognized command");
+  }
 }
 
