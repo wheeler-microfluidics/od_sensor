@@ -37,7 +37,7 @@ void handleRequest() {
 void setup() {
   i2c_address_ = eeprom_read_byte((uint8_t*)EEPROM_I2C_ADDRESS);
   polling_period_ms_ = eeprom_read_word((uint16_t*)EEPROM_POLLING_PERIOD_MS);
-  Serial.begin(115200);
+  Serial.begin(9600);
   Wire.begin(i2c_address_);
   Wire.onRequest(handleRequest);
 
@@ -175,4 +175,3 @@ void loop() {
     Serial.println("unrecognized command");
   }
 }
-

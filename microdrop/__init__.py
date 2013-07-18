@@ -186,7 +186,7 @@ class ODSensorPlugin(Plugin, AppDataController):
                 # get the od (returns a 4 byte float)
                 data = self.control_board.i2c_read(app_values['i2c_address'],
                                                    [], 4)
-                freq = struct.unpack('f', struct.pack('bbbb', data[0], data[1],
+                freq = struct.unpack('f', struct.pack('BBBB', data[0], data[1],
                                                       data[2], data[3]))[0]
                 logger.info('[ODSensorPlugin] freq=%.1f, threshold=%.1f' % \
                             (freq, options.od_threshold))
