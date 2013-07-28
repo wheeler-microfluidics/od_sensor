@@ -22,6 +22,7 @@ import sys
 import struct
 
 import gtk
+import numpy as np
 from pygtkhelpers.ui.objectlist import PropertyMapper
 from pygtkhelpers.ui.form_view_dialog import FormViewDialog
 from pygtkhelpers.ui.extra_widgets import Filepath
