@@ -5,7 +5,7 @@ import sys
 import yaml
 
 from git_util import GitUtil
-from path import path
+from path_helpers import path
 
 
 def get_version_string():
